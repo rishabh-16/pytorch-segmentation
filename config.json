@@ -8,7 +8,8 @@
         "args": {
             "backbone": "resnet50",
             "freeze_bn": false,
-            "freeze_backbone": false
+            "freeze_backbone": false,
+            "model_weights_path": None,
         }
     },
 

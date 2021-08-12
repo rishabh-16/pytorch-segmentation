@@ -7,6 +7,7 @@ from base import BaseModel
 from utils.helpers import initialize_weights, set_trainable
 from itertools import chain
 from models import resnet
+from bla bla import get_model
 
 
 def x2conv(in_channels, out_channels, inner_channels=None):
@@ -123,42 +124,94 @@ class UNet(BaseModel):
 -> Unet with a resnet backbone
 """
 
+class Conv2dReLU(nn.Sequential):
+    def __init__(
+            self,
+            in_channels,
+            out_channels,
+            kernel_size,
+            padding=0,
+            stride=1,
+            use_batchnorm=True,
+    ):
+
+        conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=not (use_batchnorm),
+        )
+        relu = nn.ReLU(inplace=True)
+
+        if use_batchnorm == 'inplace':
+            raise ValueError('not implemented')
+        if use_batchnorm and use_batchnorm != "inplace":
+            bn = nn.BatchNorm2d(out_channels)
+        else:
+            bn = nn.Identity()
+
+        super(Conv2dReLU, self).__init__(conv, bn, relu)
+
+class DecoderBlock(nn.Module):
+    def __init__(
+            self,
+            in_channels,
+            skip_channels,
+            out_channels,
+            use_batchnorm=True,
+    ):
+        super().__init__()
+        self.conv1 = Conv2dReLU(
+            in_channels + skip_channels,
+            out_channels,
+            kernel_size=3,
+            padding=1,
+            use_batchnorm=use_batchnorm,
+        )
+        self.conv2 = Conv2dReLU(
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            padding=1,
+            use_batchnorm=use_batchnorm,
+        )
+
+    def forward(self, x, skip=None):
+        x = F.interpolate(x, scale_factor=2, mode="nearest")
+        if skip is not None:
+            x = torch.cat([x, skip], dim=1)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        return x
+
 class UNetResnet(BaseModel):
-    def __init__(self, num_classes, in_channels=3, backbone='resnet50', pretrained=True, freeze_bn=False, freeze_backbone=False, **_):
+    def __init__(self, num_classes, in_channels=3, backbone='resnet50', pretrained=True, freeze_bn=False, freeze_backbone=False,model_weights_path=None, **_):
         super(UNetResnet, self).__init__()
-        model = getattr(resnet, backbone)(pretrained, norm_layer=nn.BatchNorm2d)
+        # model = getattr(resnet, backbone)(pretrained, norm_layer=nn.BatchNorm2d)
+        width = int(backbone.split('_')[-1])
+        self.model = get_model(backbone, 1000, {'weight_activation':'linear'})
 
-        self.initial = list(model.children())[:4]
-        if in_channels != 3:
-            self.initial[0] = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.initial = nn.Sequential(*self.initial)
-
+        decoder_channels = [256, 128, 64, 32, 16]
+        input_channels = [512, 256, 128, 64, 32]
+        skip_channels = [256, 128, 64, 64, 0]
         # encoder
-        self.layer1 = model.layer1
-        self.layer2 = model.layer2
-        self.layer3 = model.layer3
-        self.layer4 = model.layer4
+        self.layer1 = self.model.layer1
+        self.layer2 = self.model.layer2
+        self.layer3 = self.model.layer3 
+        self.layer4 = self.model.layer4
 
-        # decoder
-        self.conv1 = nn.Conv2d(2048, 192, kernel_size=3, stride=1, padding=1)
-        self.upconv1 =  nn.ConvTranspose2d(192, 128, 4, 2, 1, bias=False)
+        kwargs = dict(use_batchnorm=True)
+        blocks = [
+            DecoderBlock(in_ch, skip_ch, out_ch, **kwargs)
+            for in_ch, skip_ch, out_ch in zip(input_channels, skip_channels, decoder_channels)
+        ]
+        self.blocks = nn.ModuleList(blocks)
 
-        self.conv2 = nn.Conv2d(1152, 128, kernel_size=3, stride=1, padding=1)
-        self.upconv2 = nn.ConvTranspose2d(128, 96, 4, 2, 1, bias=False)
-
-        self.conv3 = nn.Conv2d(608, 96, kernel_size=3, stride=1, padding=1)
-        self.upconv3 = nn.ConvTranspose2d(96, 64, 4, 2, 1, bias=False)
-
-        self.conv4 = nn.Conv2d(320, 64, kernel_size=3, stride=1, padding=1)
-        self.upconv4 = nn.ConvTranspose2d(64, 48, 4, 2, 1, bias=False)
-        
-        self.conv5 = nn.Conv2d(48, 48, kernel_size=3, stride=1, padding=1)
-        self.upconv5 = nn.ConvTranspose2d(48, 32, 4, 2, 1, bias=False)
-
-        self.conv6 = nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1)
-        self.conv7 = nn.Conv2d(32, num_classes, kernel_size=1, bias=False)
-
-        initialize_weights(self)
+        self.segmentation_head = nn.Conv2d(decoder_channels[-1], num_classes, kernel_size=3, padding=1)
+        self._initialize_weights()
+        self.model.load_state_dict(torch.load(model_weights_path))
 
         if freeze_bn:
             self.freeze_bn()
@@ -167,42 +220,39 @@ class UNetResnet(BaseModel):
 
     def forward(self, x):
         H, W = x.size(2), x.size(3)
-        x1 = self.layer1(self.initial(x))
+        x = self.model.conv1(x)
+        x = self.model.bn1(x)
+        x0 = self.model.activ(x)
+        x = self.maxpool(x0)
+        x1 = self.layer1(x)
         x2 = self.layer2(x1)
         x3 = self.layer3(x2)
         x4 = self.layer4(x3)
-        
-        x = self.upconv1(self.conv1(x4))
-        x = F.interpolate(x, size=(x3.size(2), x3.size(3)), mode="bilinear", align_corners=True)
-        x = torch.cat([x, x3], dim=1)
-        x = self.upconv2(self.conv2(x))
 
-        x = F.interpolate(x, size=(x2.size(2), x2.size(3)), mode="bilinear", align_corners=True)
-        x = torch.cat([x, x2], dim=1)
-        x = self.upconv3(self.conv3(x))
-
-        x = F.interpolate(x, size=(x1.size(2), x1.size(3)), mode="bilinear", align_corners=True)
-        x = torch.cat([x, x1], dim=1)
-
-        x = self.upconv4(self.conv4(x))
-
-        x = self.upconv5(self.conv5(x))
-
-        # if the input is not divisible by the output stride
-        if x.size(2) != H or x.size(3) != W:
-            x = F.interpolate(x, size=(H, W), mode="bilinear", align_corners=True)
-
-        x = self.conv7(self.conv6(x))
+        skips = [x3, x2, x1, x0]
+        x = x4
+        for i, decoder_block in enumerate(self.blocks):
+            skip = skips[i] if i < len(skips) else None
+            x = decoder_block(x, skip)
+        x = self.segmentation_head(x)
         return x
 
+    def _initialize_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                nn.init.kaiming_normal_(module.weight)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+            elif isinstance(module, nn.BatchNorm2d):
+                module.weight.data.fill_(1)
+                module.bias.data.zero_()
+
     def get_backbone_params(self):
-        return chain(self.initial.parameters(), self.layer1.parameters(), self.layer2.parameters(), 
+        return chain(self.model.conv1.parameters(), self.model.bn1.parameters(), self.layer1.parameters(), self.layer2.parameters(), 
                     self.layer3.parameters(), self.layer4.parameters())
 
     def get_decoder_params(self):
-        return chain(self.conv1.parameters(), self.upconv1.parameters(), self.conv2.parameters(), self.upconv2.parameters(),
-                    self.conv3.parameters(), self.upconv3.parameters(), self.conv4.parameters(), self.upconv4.parameters(),
-                    self.conv5.parameters(), self.upconv5.parameters(), self.conv6.parameters(), self.conv7.parameters())
+        return chain(self.block.parameters(), self.segmentation_head.parameters())
 
     def freeze_bn(self):
         for module in self.modules():
