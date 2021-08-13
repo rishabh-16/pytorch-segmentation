@@ -201,6 +201,11 @@ class UNetResnet(BaseModel):
         self.layer2 = self.model.layer2
         self.layer3 = self.model.layer3 
         self.layer4 = self.model.layer4
+        
+        self.conv4 = Conv2dReLU(input_channels[0]*width, input_channels[0], kernel_size=1)
+        self.conv3 = Conv2dReLU(skip_channels[0]*width, skip_channels[0], kernel_size=1)
+        self.conv2 = Conv2dReLU(skip_channels[1]*width, skip_channels[1], kernel_size=1)
+        self.conv1 = Conv2dReLU(skip_channels[2]*width, skip_channels[2], kernel_size=1)
 
         kwargs = dict(use_batchnorm=True)
         blocks = [
@@ -224,10 +229,10 @@ class UNetResnet(BaseModel):
         x = self.model.bn1(x)
         x0 = self.model.activ(x)
         x = self.maxpool(x0)
-        x1 = self.layer1(x)
-        x2 = self.layer2(x1)
-        x3 = self.layer3(x2)
-        x4 = self.layer4(x3)
+        x1 = self.conv1(self.layer1(x))
+        x2 = self.conv2(self.layer2(x1))
+        x3 = self.conv3(self.layer3(x2))
+        x4 = self.conv4(self.layer4(x3))
 
         skips = [x3, x2, x1, x0]
         x = x4
